@@ -1,0 +1,84 @@
+
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Vector+Graph DB — Demo UI</title>
+  <style>
+    body { font-family: system-ui, Arial; max-width: 900px; margin: 2rem auto; line-height: 1.4; }
+    input, button, select, textarea { font-size: 14px; padding: 8px; margin: 4px 0; width: 100%; }
+    .row { display:flex; gap:8px; }
+    .col { flex:1; }
+    .card { border:1px solid #ddd; padding:10px; margin:8px 0; border-radius:8px; }
+    pre { background:#fafafa; padding:8px; overflow:auto; }
+  </style>
+</head>
+<body>
+  <h1>Vector + Graph DB — Demo</h1>
+  <p>Make sure backend is running at <code>http://localhost:8000</code></p>
+
+  <h3>Hybrid Search</h3>
+  <input id="q" placeholder="Enter query text..." value="How do transformers use attention?"/>
+  <div class="row">
+    <div class="col"><input id="topk" placeholder="top_k" value="5"/></div>
+    <div class="col"><input id="vweight" placeholder="vector_weight" value="0.6"/></div>
+    <div class="col"><input id="gweight" placeholder="graph_weight" value="0.4"/></div>
+  </div>
+  <button onclick="hybrid()">Run Hybrid Search</button>
+  <div id="hybridResults"></div>
+
+  <h3>Vector Search</h3>
+  <input id="qv" placeholder="Vector query" value="sentence embeddings meaning"/>
+  <button onclick="vectorSearch()">Vector Search</button>
+  <div id="vecResults"></div>
+
+  <h3>Graph Traversal</h3>
+  <input id="startid" placeholder="start node id (e.g., 1)" value="1"/>
+  <input id="depth" placeholder="depth" value="2"/>
+  <button onclick="graphSearch()">Graph Search</button>
+  <div id="graphResults"></div>
+
+  <h3>Nodes (quick view)</h3>
+  <button onclick="loadNodes()">Load nodes</button>
+  <div id="nodes"></div>
+
+  <script>
+    const API = "http://localhost:8000";
+
+    async function hybrid(){
+      const q = document.getElementById('q').value;
+      const top_k = parseInt(document.getElementById('topk').value||5);
+      const vector_weight = parseFloat(document.getElementById('vweight').value||0.6);
+      const graph_weight = parseFloat(document.getElementById('gweight').value||0.4);
+      const res = await fetch(API + "/search/hybrid", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({query_text:q, top_k, vector_weight, graph_weight})});
+      const data = await res.json();
+      const el = document.getElementById('hybridResults');
+      el.innerHTML = data.map(d => `<div class="card"><strong>score:</strong> ${d.score.toFixed(4)}<br/><strong>title:</strong> ${d.node.title}<br/><pre>${d.node.text}</pre></div>`).join('');
+    }
+
+    async function vectorSearch(){
+      const q = document.getElementById('qv').value;
+      const res = await fetch(API + "/search/vector", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({query_text:q, top_k:5})});
+      const data = await res.json();
+      const el = document.getElementById('vecResults');
+      el.innerHTML = data.map(d => `<div class="card"><strong>score:</strong> ${d.score.toFixed(4)}<br/><strong>title:</strong> ${d.node.title}<br/><pre>${d.node.text}</pre></div>`).join('');
+    }
+
+    async function graphSearch(){
+      const start = document.getElementById('startid').value;
+      const depth = document.getElementById('depth').value;
+      const res = await fetch(API + `/search/graph?start_id=${start}&depth=${depth}`);
+      const data = await res.json();
+      const el = document.getElementById('graphResults');
+      el.innerHTML = data.map(d => `<div class="card"><strong>distance:</strong> ${d.distance}<br/><strong>title:</strong> ${d.node.title}<br/><pre>${d.node.text}</pre></div>`).join('');
+    }
+
+    async function loadNodes(){
+      const res = await fetch(API + "/search/vector", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({query_text:"", top_k:50})});
+      const data = await res.json();
+      const el = document.getElementById('nodes');
+      el.innerHTML = data.map(d => `<div class="card"><strong>id:</strong> ${d.node.id} <strong>title:</strong> ${d.node.title}</div>`).join('');
+    }
+  </script>
+</body>
+</html>
