@@ -1,84 +1,130 @@
-
-<!doctype html>
-<html>
+<!DOCTYPE html>
+<html lang="en">
 <head>
-  <meta charset="utf-8">
-  <title>Vector+Graph DB — Demo UI</title>
-  <style>
-    body { font-family: system-ui, Arial; max-width: 900px; margin: 2rem auto; line-height: 1.4; }
-    input, button, select, textarea { font-size: 14px; padding: 8px; margin: 4px 0; width: 100%; }
-    .row { display:flex; gap:8px; }
-    .col { flex:1; }
-    .card { border:1px solid #ddd; padding:10px; margin:8px 0; border-radius:8px; }
-    pre { background:#fafafa; padding:8px; overflow:auto; }
-  </style>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Hybrid Graph+Vector Engine</title>
+    <style>
+        body { font-family: 'Segoe UI', sans-serif; max-width: 900px; margin: 0 auto; padding: 20px; background-color: #f8f9fa; }
+        .container { background: white; padding: 30px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); }
+        
+        /* Upload Section */
+        .upload-box { background: #e9ecef; padding: 20px; border-radius: 8px; margin-bottom: 30px; border: 2px dashed #ced4da; text-align: center; }
+        .upload-box h3 { margin-top: 0; color: #495057; }
+        
+        /* Search Section */
+        input[type="text"] { width: 70%; padding: 12px; border: 1px solid #ced4da; border-radius: 6px; font-size: 16px; }
+        button { padding: 12px 25px; border: none; border-radius: 6px; cursor: pointer; font-weight: bold; transition: 0.2s; }
+        .btn-search { background-color: #0d6efd; color: white; }
+        .btn-search:hover { background-color: #0b5ed7; }
+        .btn-upload { background-color: #198754; color: white; margin-top: 10px; }
+        
+        /* Results */
+        .result { border-bottom: 1px solid #eee; padding: 20px 0; }
+        .result-title { font-size: 1.2em; color: #0d6efd; font-weight: bold; margin-bottom: 5px; }
+        .result-text { color: #555; margin-bottom: 8px; }
+        .meta { font-size: 0.9em; color: #6c757d; background: #f8f9fa; padding: 5px 10px; border-radius: 4px; display: inline-block; }
+    </style>
 </head>
 <body>
-  <h1>Vector + Graph DB — Demo</h1>
-  <p>Make sure backend is running at <code>http://localhost:8000</code></p>
 
-  <h3>Hybrid Search</h3>
-  <input id="q" placeholder="Enter query text..." value="How do transformers use attention?"/>
-  <div class="row">
-    <div class="col"><input id="topk" placeholder="top_k" value="5"/></div>
-    <div class="col"><input id="vweight" placeholder="vector_weight" value="0.6"/></div>
-    <div class="col"><input id="gweight" placeholder="graph_weight" value="0.4"/></div>
-  </div>
-  <button onclick="hybrid()">Run Hybrid Search</button>
-  <div id="hybridResults"></div>
+<div class="container">
+    <h1>🚀 Universal Hybrid Database</h1>
+    <p>Ingest <b>Any Data</b> -> Process into <b>Vector + Graph</b> -> <b>Hybrid Retrieval</b></p>
+    
+    <div class="upload-box">
+        <h3>📂 Upload Knowledge</h3>
+        <p>Upload a PDF or Text file to instantly add it to the Graph & Vector DB.</p>
+        <input type="file" id="fileInput">
+        <br>
+        <button class="btn-upload" onclick="uploadFile()">Upload & Process</button>
+        <p id="uploadStatus" style="margin-top: 10px; font-weight: bold;"></p>
+    </div>
 
-  <h3>Vector Search</h3>
-  <input id="qv" placeholder="Vector query" value="sentence embeddings meaning"/>
-  <button onclick="vectorSearch()">Vector Search</button>
-  <div id="vecResults"></div>
+    <div style="display: flex; gap: 10px; margin-top: 20px;">
+        <input type="text" id="queryInput" placeholder="Ask a question (e.g., 'What is in the document?')">
+        <button class="btn-search" onclick="performSearch()">Hybrid Search</button>
+    </div>
 
-  <h3>Graph Traversal</h3>
-  <input id="startid" placeholder="start node id (e.g., 1)" value="1"/>
-  <input id="depth" placeholder="depth" value="2"/>
-  <button onclick="graphSearch()">Graph Search</button>
-  <div id="graphResults"></div>
+    <div id="resultsArea"></div>
+</div>
 
-  <h3>Nodes (quick view)</h3>
-  <button onclick="loadNodes()">Load nodes</button>
-  <div id="nodes"></div>
+<script>
+    // --- FEATURE 1: UPLOAD FILES ---
+    async function uploadFile() {
+        const fileInput = document.getElementById('fileInput');
+        const status = document.getElementById('uploadStatus');
+        
+        if (fileInput.files.length === 0) {
+            status.innerText = "Please select a file first!";
+            status.style.color = "red";
+            return;
+        }
 
-  <script>
-    const API = "http://localhost:8000";
+        const formData = new FormData();
+        formData.append("file", fileInput.files[0]);
+        
+        status.innerText = "Processing... Extracting Text & Entities...";
+        status.style.color = "blue";
 
-    async function hybrid(){
-      const q = document.getElementById('q').value;
-      const top_k = parseInt(document.getElementById('topk').value||5);
-      const vector_weight = parseFloat(document.getElementById('vweight').value||0.6);
-      const graph_weight = parseFloat(document.getElementById('gweight').value||0.4);
-      const res = await fetch(API + "/search/hybrid", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({query_text:q, top_k, vector_weight, graph_weight})});
-      const data = await res.json();
-      const el = document.getElementById('hybridResults');
-      el.innerHTML = data.map(d => `<div class="card"><strong>score:</strong> ${d.score.toFixed(4)}<br/><strong>title:</strong> ${d.node.title}<br/><pre>${d.node.text}</pre></div>`).join('');
+        try {
+            const response = await fetch('http://127.0.0.1:8000/upload', {
+                method: 'POST',
+                body: formData
+            });
+            const data = await response.json();
+            
+            if (response.ok) {
+                status.innerText = `✅ Success! Added "${fileInput.files[0].name}" with ${data.entities_found} graph connections.`;
+                status.style.color = "green";
+            } else {
+                status.innerText = "Error: " + data.detail;
+                status.style.color = "red";
+            }
+        } catch (error) {
+            status.innerText = "Connection Failed. Is backend running?";
+            status.style.color = "red";
+        }
     }
 
-    async function vectorSearch(){
-      const q = document.getElementById('qv').value;
-      const res = await fetch(API + "/search/vector", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({query_text:q, top_k:5})});
-      const data = await res.json();
-      const el = document.getElementById('vecResults');
-      el.innerHTML = data.map(d => `<div class="card"><strong>score:</strong> ${d.score.toFixed(4)}<br/><strong>title:</strong> ${d.node.title}<br/><pre>${d.node.text}</pre></div>`).join('');
-    }
+    // --- FEATURE 2: HYBRID SEARCH ---
+    async function performSearch() {
+        const query = document.getElementById('queryInput').value;
+        const resultsArea = document.getElementById('resultsArea');
+        resultsArea.innerHTML = "<p>Searching Vector & Graph indices...</p>";
 
-    async function graphSearch(){
-      const start = document.getElementById('startid').value;
-      const depth = document.getElementById('depth').value;
-      const res = await fetch(API + `/search/graph?start_id=${start}&depth=${depth}`);
-      const data = await res.json();
-      const el = document.getElementById('graphResults');
-      el.innerHTML = data.map(d => `<div class="card"><strong>distance:</strong> ${d.distance}<br/><strong>title:</strong> ${d.node.title}<br/><pre>${d.node.text}</pre></div>`).join('');
-    }
+        try {
+            const response = await fetch('http://127.0.0.1:8000/search/hybrid', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ query: query })
+            });
+            const data = await response.json();
 
-    async function loadNodes(){
-      const res = await fetch(API + "/search/vector", {method:"POST", headers:{"Content-Type":"application/json"}, body: JSON.stringify({query_text:"", top_k:50})});
-      const data = await res.json();
-      const el = document.getElementById('nodes');
-      el.innerHTML = data.map(d => `<div class="card"><strong>id:</strong> ${d.node.id} <strong>title:</strong> ${d.node.title}</div>`).join('');
+            resultsArea.innerHTML = "";
+            if (!data.results || data.results.length === 0) {
+                resultsArea.innerHTML = "<p>No results found.</p>";
+                return;
+            }
+
+            data.results.forEach(item => {
+                const div = document.createElement('div');
+                div.className = 'result';
+                div.innerHTML = `
+                    <div class="result-title">📄 ${item.title}</div>
+                    <div class="result-text">${item.text}</div>
+                    <div class="meta">
+                        <b>Score:</b> ${item.score.toFixed(4)} | 
+                        <b>Graph Context:</b> ${item.details}
+                    </div>
+                `;
+                resultsArea.appendChild(div);
+            });
+        } catch (error) {
+            resultsArea.innerHTML = `<p style="color:red">Error: ${error.message}</p>`;
+        }
     }
-  </script>
+</script>
+
 </body>
 </html>

@@ -1,0 +1,8 @@
+fastapi
+uvicorn
+chromadb
+kuzu
+numpy
+pydantic
+python-multipart
+# Removed: spacy, sentence-transformers (The cause of your errors)

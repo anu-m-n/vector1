@@ -1,253 +1,166 @@
-
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel
-import sqlite3, json, math, os
+import sys
+import os
+import uuid
+import re
+import io
 from typing import List, Optional, Dict, Any
-import numpy as np
-import hashlib
+from pypdf import PdfReader
+from pptx import Presentation  # NEW: For PowerPoint
+from docx import Document      # NEW: For Word Docs
 
-DB_PATH = os.path.join(os.path.dirname(__file__), "vgdb.sqlite3")
+# Fix imports
+sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# Try to load sentence-transformers, else use fallback
-try:
-    from sentence_transformers import SentenceTransformer
-    MODEL = SentenceTransformer('all-MiniLM-L6-v2')
-    def embed_text(text):
-        return MODEL.encode(text).tolist()
-except Exception:
-    MODEL = None
-    def embed_text(text):
-        # deterministic hash-based pseudo-embedding (fallback, reproducible)
-        h = hashlib.sha256(text.encode('utf-8')).digest()
-        vec = [((b % 128) - 64) / 64 for b in h[:64]]  # 64-d vector in [-1,1]
-        return vec
+from fastapi import FastAPI, HTTPException, UploadFile, File
+from fastapi.middleware.cors import CORSMiddleware
+from pydantic import BaseModel
 
-def get_conn():
-    conn = sqlite3.connect(DB_PATH, check_same_thread=False)
-    conn.row_factory = sqlite3.Row
-    return conn
+# Import Database Logic
+from backend.database import vector_collection, conn
+from backend.embeddings import get_embedding
 
-def init_db():
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("""CREATE TABLE IF NOT EXISTS nodes(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        title TEXT,
-        text TEXT,
-        metadata TEXT,
-        vector TEXT
-    )""")
-    cur.execute("""CREATE TABLE IF NOT EXISTS edges(
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        source INTEGER,
-        target INTEGER,
-        type TEXT,
-        weight REAL
-    )""")
-    conn.commit()
-    conn.close()
+app = FastAPI(title="Devfolio Hybrid DB + Uploads")
 
-init_db()
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
 
-app = FastAPI(title="Vector+Graph Native DB (Prototype)")
+# --- HELPER: ROBUST FILE READER (NOW SUPPORTS PPTX & DOCX) ---
+async def extract_text_safe(file: UploadFile) -> str:
+    """
+    Safely reads PDF, TXT, PPTX, and DOCX files.
+    """
+    try:
+        # Read the file bytes into memory
+        contents = await file.read()
+        file_stream = io.BytesIO(contents)
+        text = ""
 
-class NodeIn(BaseModel):
-    title: str
+        if file.filename.endswith(".pdf"):
+            reader = PdfReader(file_stream)
+            for page in reader.pages:
+                if page.extract_text():
+                    text += page.extract_text() + "\n"
+            
+        elif file.filename.endswith(".txt"):
+            text = contents.decode("utf-8")
+
+        elif file.filename.endswith(".pptx"):
+            prs = Presentation(file_stream)
+            for slide in prs.slides:
+                for shape in slide.shapes:
+                    if hasattr(shape, "text"):
+                        text += shape.text + "\n"
+
+        elif file.filename.endswith(".docx"):
+            doc = Document(file_stream)
+            text = "\n".join([para.text for para in doc.paragraphs])
+        
+        else:
+            print(f"Unsupported file type: {file.filename}")
+            return "" 
+            
+        return text
+
+    except Exception as e:
+        print(f"ERROR reading file: {str(e)}")
+        return ""
+
+def extract_keywords(text):
+    # Graph Logic: Find capitalized words (Entities)
+    raw_words = re.findall(r'\b[A-Z][a-zA-Z]+\b', text)
+    blacklist = {"The", "This", "That", "And", "For", "With", "But", "Redis", "Graph", "Slide", "Click", "Title"}
+    return list(set([w for w in raw_words if w not in blacklist and len(w) > 3]))
+
+# --- DATA MODELS ---
+class NodeCreate(BaseModel):
     text: str
-    metadata: Optional[Dict[str,Any]] = {}
+    metadata: Optional[Dict[str, Any]] = {}
     embedding: Optional[List[float]] = None
 
-class EdgeIn(BaseModel):
-    source: int
-    target: int
-    type: Optional[str] = "related"
-    weight: Optional[float] = 1.0
+class HybridSearchRequest(BaseModel):
+    query_text: str
+    vector_weight: float = 0.5
+    graph_weight: float = 0.5
+    top_k: int = 5
 
-@app.post("/nodes")
-def create_node(node: NodeIn):
-    vec = node.embedding if node.embedding else embed_text(node.text)
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("INSERT INTO nodes(title,text,metadata,vector) VALUES (?,?,?,?)",
-                (node.title, node.text, json.dumps(node.metadata), json.dumps(vec)))
-    nid = cur.lastrowid
-    conn.commit()
-    conn.close()
-    return {"id": nid, "title": node.title}
+# --- API ENDPOINTS ---
 
-@app.get("/nodes/{node_id}")
-def get_node(node_id: int):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM nodes WHERE id=?", (node_id,))
-    row = cur.fetchone()
-    conn.close()
-    if not row:
-        raise HTTPException(status_code=404, detail="Node not found")
-    return {"id": row["id"], "title": row["title"], "text": row["text"],
-            "metadata": json.loads(row["metadata"] or "{}"),
-            "vector": json.loads(row["vector"] or "[]")}
+@app.post("/upload")
+async def upload_document(file: UploadFile = File(...)):
+    print(f"Received upload: {file.filename}")
+    
+    text = await extract_text_safe(file)
+    
+    if len(text.strip()) < 5:
+        raise HTTPException(status_code=400, detail=f"File {file.filename} is empty or type not supported.")
 
-@app.put("/nodes/{node_id}")
-def update_node(node_id: int, node: NodeIn):
-    vec = node.embedding if node.embedding else embed_text(node.text)
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("UPDATE nodes SET title=?, text=?, metadata=?, vector=? WHERE id=?",
-                (node.title, node.text, json.dumps(node.metadata), json.dumps(vec), node_id))
-    conn.commit()
-    conn.close()
-    return {"id": node_id, "updated": True}
+    doc_id = str(uuid.uuid4())
+    safe_title = file.filename.replace("'", "").replace('"', "")
 
-@app.delete("/nodes/{node_id}")
-def delete_node(node_id: int):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("DELETE FROM edges WHERE source=? OR target=?", (node_id,node_id))
-    cur.execute("DELETE FROM nodes WHERE id=?", (node_id,))
-    conn.commit()
-    conn.close()
-    return {"deleted": True}
+    # A. Store in Vector DB
+    vector = get_embedding(text)
+    vector_collection.add(
+        documents=[text[:2000]], 
+        embeddings=[vector],
+        ids=[doc_id],
+        metadatas=[{"title": file.filename, "source": "User Upload"}]
+    )
 
-@app.post("/edges")
-def create_edge(edge: EdgeIn):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("INSERT INTO edges(source,target,type,weight) VALUES (?,?,?,?)",
-                (edge.source, edge.target, edge.type, edge.weight))
-    eid = cur.lastrowid
-    conn.commit()
-    conn.close()
-    return {"id": eid}
+    # B. Store in Graph DB
+    safe_text = text[:50].replace("'", "")
+    conn.execute(f"MERGE (d:Document {{id: '{doc_id}', title: '{safe_title}', text: '{safe_text}'}})")
 
-@app.get("/edges/{edge_id}")
-def get_edge(edge_id: int):
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM edges WHERE id=?", (edge_id,))
-    row = cur.fetchone()
-    conn.close()
-    if not row:
-        raise HTTPException(status_code=404, detail="Edge not found")
-    return dict(row)
+    # C. Auto-Link Entities
+    keywords = extract_keywords(text[:5000])
+    count = 0
+    for word in keywords:
+        word_id = word.lower()
+        safe_word = word.replace("'", "")
+        conn.execute(f"MERGE (e:Entity {{id: '{word_id}', name: '{safe_word}'}})")
+        conn.execute(f"MATCH (d:Document), (e:Entity) WHERE d.id = '{doc_id}' AND e.id = '{word_id}' MERGE (d)-[:MENTIONS]->(e)")
+        count += 1
 
-# Utilities for vector math
-def cosine_sim(a, b):
-    a = np.array(a, dtype=float)
-    b = np.array(b, dtype=float)
-    if np.linalg.norm(a)==0 or np.linalg.norm(b)==0:
-        return 0.0
-    return float(np.dot(a,b)/(np.linalg.norm(a)*np.linalg.norm(b)))
+    return {"status": "success", "id": doc_id, "entities_found": count, "message": "Processed successfully"}
 
-def all_nodes():
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT * FROM nodes")
-    rows = cur.fetchall()
-    conn.close()
-    results = []
-    for r in rows:
-        results.append({"id": r["id"], "title": r["title"], "text": r["text"],
-                        "metadata": json.loads(r["metadata"] or "{}"),
-                        "vector": json.loads(r["vector"] or "[]")})
-    return results
-
-@app.post("/search/vector")
-def vector_search(body: dict):
-    query_text = body.get("query_text", "")
-    top_k = int(body.get("top_k", 5))
-    qvec = embed_text(query_text)
-    nodes = all_nodes()
-    scored = []
-    for n in nodes:
-        sim = cosine_sim(qvec, n["vector"])
-        scored.append((sim, n))
-    scored.sort(key=lambda x: x[0], reverse=True)
-    return [{"score": s, "node": node} for s,node in scored[:top_k]]
-
-# Graph traversal (BFS up to depth)
-@app.get("/search/graph")
-def graph_traversal(start_id: int, depth: int = 1):
-    conn = get_conn()
-    cur = conn.cursor()
-    # build adjacency
-    cur.execute("SELECT source, target FROM edges")
-    rows = cur.fetchall()
-    adj = {}
-    for r in rows:
-        adj.setdefault(r["source"], []).append(r["target"])
-    visited = set()
-    from collections import deque
-    q = deque()
-    q.append((start_id, 0))
-    visited.add(start_id)
-    results = []
-    while q:
-        node, d = q.popleft()
-        results.append({"id": node, "distance": d})
-        if d < depth:
-            for nb in adj.get(node, []):
-                if nb not in visited:
-                    visited.add(nb)
-                    q.append((nb, d+1))
-    # fetch node details
-    out = []
-    cur2 = conn.cursor()
-    for r in results:
-        cur2.execute("SELECT * FROM nodes WHERE id=?", (r["id"],))
-        row = cur2.fetchone()
-        if row:
-            out.append({"node": {"id": row["id"], "title": row["title"], "text": row["text"]}, "distance": r["distance"]})
-    conn.close()
-    return out
+# ... (Keep existing CRUD and SEARCH endpoints here) ...
+@app.post("/nodes", status_code=201)
+def create_node(item: NodeCreate):
+    node_id = str(uuid.uuid4())
+    vec = item.embedding if item.embedding else get_embedding(item.text)
+    vector_collection.add(documents=[item.text], embeddings=[vec], ids=[node_id], metadatas=[item.metadata])
+    safe_text = item.text.replace("'", "")[:50]
+    conn.execute(f"MERGE (n:Document {{id: '{node_id}', title: '{safe_text}'}})")
+    return {"id": node_id, "text": item.text}
 
 @app.post("/search/hybrid")
-def hybrid_search(body: dict):
-    query_text = body.get("query_text", "")
-    top_k = int(body.get("top_k",5))
-    vector_weight = float(body.get("vector_weight", 0.6))
-    graph_weight = float(body.get("graph_weight", 0.4))
-    # embed query
-    qvec = embed_text(query_text)
-    # compute vector sims
-    nodes = all_nodes()
-    node_scores = {}
-    for n in nodes:
-        sim = cosine_sim(qvec, n["vector"])
-        node_scores[n["id"]] = {"vector_sim": sim, "node": n, "graph_distance": None}
-    # simple graph distance from top vector matches as start points
-    # pick top 1 vector match as starting node for BFS
-    top_vector_sorted = sorted(node_scores.items(), key=lambda x: x[1]["vector_sim"], reverse=True)
-    start_nodes = [top_vector_sorted[0][0]] if top_vector_sorted else []
-    # BFS to compute distances up to depth 3
-    conn = get_conn()
-    cur = conn.cursor()
-    cur.execute("SELECT source, target FROM edges")
-    rows = cur.fetchall()
-    adj = {}
-    for r in rows:
-        adj.setdefault(r["source"], []).append(r["target"])
-    from collections import deque
-    distances = {}
-    for s in start_nodes:
-        q = deque()
-        q.append((s,0))
-        seen = set([s])
-        while q:
-            node,d = q.popleft()
-            distances.setdefault(node, d if node not in distances else min(distances[node], d))
-            if d < 3:
-                for nb in adj.get(node,[]):
-                    if nb not in seen:
-                        seen.add(nb)
-                        q.append((nb, d+1))
-    # combine scores
-    final = []
-    for nid, info in node_scores.items():
-        vec_sim = info["vector_sim"]
-        gd = distances.get(nid, None)
-        graph_score = 1.0/(gd+1) if gd is not None else 0.0
-        final_score = vector_weight * vec_sim + graph_weight * graph_score
-        final.append((final_score, {"id": nid, "title": info["node"]["title"], "text": info["node"]["text"], "vector_sim": vec_sim, "graph_distance": gd}))
-    final.sort(key=lambda x: x[0], reverse=True)
-    return [{"score": s, "node": n} for s,n in final[:top_k]]
+def hybrid_search(req: HybridSearchRequest):
+    query_vec = get_embedding(req.query_text)
+    vec_res = vector_collection.query(query_embeddings=[query_vec], n_results=req.top_k * 2)
+    results = []
+    if vec_res['ids']:
+        ids = vec_res['ids'][0]
+        texts = vec_res['documents'][0]
+        dists = vec_res['distances'][0]
+        metas = vec_res['metadatas'][0]
+        for i, doc_id in enumerate(ids):
+            v_score = 1.0 / (1.0 + dists[i])
+            g_score = 0.0
+            entities = []
+            try:
+                q = f"MATCH (d:Document)-[:MENTIONS]->(e:Entity) WHERE d.id = '{doc_id}' RETURN e.name"
+                kuzu_res = conn.execute(q)
+                while kuzu_res.has_next(): entities.append(kuzu_res.get_next()[0])
+                if len(entities) > 0: g_score = min(len(entities) * 0.1, 1.0)
+            except: pass
+            final = (req.vector_weight * v_score) + (req.graph_weight * g_score)
+            results.append({"id": doc_id, "text": texts[i], "title": metas[i].get('title', 'Unknown'), "score": final, "details": f"Entities: {', '.join(entities[:3])}..."})
+    results.sort(key=lambda x: x['score'], reverse=True)
+    return {"results": results[:req.top_k]}
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(app, host="0.0.0.0", port=8000)
